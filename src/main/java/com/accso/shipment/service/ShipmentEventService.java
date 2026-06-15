@@ -1,7 +1,6 @@
 package com.accso.shipment.service;
 
 import com.accso.shipment.dto.AuditLogResponse;
-import com.accso.shipment.dto.BatchEventRequest;
 import com.accso.shipment.dto.BatchEventResponse;
 import com.accso.shipment.dto.EventIngestionResponse;
 import com.accso.shipment.dto.ShipmentEventRequest;
@@ -124,8 +123,8 @@ public class ShipmentEventService {
      * Process a batch of events. Each event is processed individually through receiveEvent(),
      * so one bad event does not poison the batch.
      */
-    public BatchEventResponse receiveBatchEvents(BatchEventRequest request) {
-        List<EventIngestionResponse> results = request.getEvents().stream()
+    public BatchEventResponse receiveBatchEvents(List<ShipmentEventRequest> events) {
+        List<EventIngestionResponse> results = events.stream()
                 .map(this::receiveEvent)
                 .toList();
         return BatchEventResponse.of(results);

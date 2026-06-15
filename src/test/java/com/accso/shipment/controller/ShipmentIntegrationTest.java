@@ -200,11 +200,10 @@ class ShipmentIntegrationTest {
                 createEventRequest("batch-evt-1", "ship-batch-1", ShipmentStatus.LABEL_CREATED),
                 createEventRequest("batch-evt-2", "ship-batch-1", ShipmentStatus.HANDED_TO_CARRIER)
         );
-        BatchEventRequest batchRequest = BatchEventRequest.builder().events(events).build();
 
-        mockMvc.perform(post("/api/v1/shipments/events/list")
+        mockMvc.perform(post("/api/v1/shipments/events")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(batchRequest)))
+                        .content(objectMapper.writeValueAsString(events)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.totalReceived").value(2))
                 .andExpect(jsonPath("$.acceptedCount").value(2))
@@ -217,11 +216,10 @@ class ShipmentIntegrationTest {
                 createEventRequest("batch-dup-1", "ship-batch-dup", ShipmentStatus.LABEL_CREATED),
                 createEventRequest("batch-dup-1", "ship-batch-dup", ShipmentStatus.LABEL_CREATED)
         );
-        BatchEventRequest batchRequest = BatchEventRequest.builder().events(events).build();
 
-        mockMvc.perform(post("/api/v1/shipments/events/list")
+        mockMvc.perform(post("/api/v1/shipments/events")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(batchRequest)))
+                        .content(objectMapper.writeValueAsString(events)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.totalReceived").value(2))
                 .andExpect(jsonPath("$.acceptedCount").value(1))
@@ -234,11 +232,10 @@ class ShipmentIntegrationTest {
                 createEventRequest("batch-atomic-1", "ship-batch-atomic", ShipmentStatus.LABEL_CREATED),
                 createEventRequest("batch-atomic-2", "ship-batch-atomic", ShipmentStatus.DELIVERED)
         );
-        BatchEventRequest batchRequest = BatchEventRequest.builder().events(events).build();
 
-        mockMvc.perform(post("/api/v1/shipments/events/list")
+        mockMvc.perform(post("/api/v1/shipments/events")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(batchRequest)))
+                        .content(objectMapper.writeValueAsString(events)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.totalReceived").value(2))
                 .andExpect(jsonPath("$.acceptedCount").value(1))
