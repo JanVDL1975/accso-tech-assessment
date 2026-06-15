@@ -1,11 +1,18 @@
 package com.accso.shipment.service;
 
+import com.accso.shipment.dto.AuditLogResponse;
+import com.accso.shipment.dto.BatchEventResponse;
 import com.accso.shipment.dto.EventIngestionResponse;
 import com.accso.shipment.dto.ShipmentEventRequest;
 import com.accso.shipment.dto.ShipmentEventResponse;
 import com.accso.shipment.dto.ShipmentStatusResponse;
+import com.accso.shipment.entity.AuditLogEntity;
+import com.accso.shipment.entity.AuditLogEntity.AuditDecision;
+import com.accso.shipment.entity.RawEventEntity;
 import com.accso.shipment.entity.ShipmentCurrentStateEntity;
 import com.accso.shipment.entity.ShipmentEventEntity;
+import com.accso.shipment.repository.AuditLogRepository;
+import com.accso.shipment.repository.RawEventRepository;
 import com.accso.shipment.repository.ShipmentCurrentStateRepository;
 import com.accso.shipment.repository.ShipmentEventRepository;
 import lombok.RequiredArgsConstructor;
@@ -25,38 +32,76 @@ import java.util.Optional;
 @Slf4j
 public class ShipmentEventService {
 
+    private final RawEventRepository rawEventRepository;
     private final ShipmentEventRepository eventRepository;
     private final ShipmentCurrentStateRepository currentStateRepository;
+    private final AuditLogRepository auditLogRepository;
     private final ShipmentStateResolver stateResolver;
 
     /**
      * Process incoming shipment event.
      * Flow:
-     * 1. Check for duplicate event
-     * 2. Resolve state transition
-     * 3. If accepted: persist to derived_events and update current state
+     * 1. Check for duplicate event in raw_events
+     * 2. Persist to raw_events (as-received, before any processing)
+     * 3. Resolve state transition
+     * 4. Write audit_log entry
+     * 5. If accepted: persist to derived_events and update current state
      */
     @Transactional
     public EventIngestionResponse receiveEvent(ShipmentEventRequest request) {
         String eventId = request.getEventId();
         String partner = request.getPartner();
 
-        // Step 1: Duplicate check
-        if (eventRepository.existsByEventIdAndPartner(eventId, partner)) {
+        // Step 1: Duplicate check against raw_events
+        if (rawEventRepository.existsByEventIdAndPartner(eventId, partner)) {
             log.info("Duplicate event detected: eventId={}, partner={}", eventId, partner);
+            writeAuditLog(request, null, null, AuditDecision.REJECTED, "DUPLICATE_EVENT");
             return EventIngestionResponse.duplicate(eventId);
         }
+
+        // Step 2: Persist to raw_events immediately (as-received)
+        RawEventEntity rawEvent = RawEventEntity.builder()
+                .eventId(eventId)
+                .shipmentId(request.getShipmentId())
+                .partner(partner)
+                .status(request.getStatus())
+                .occurredAt(request.getOccurredAt())
+                .receivedAt(request.getReceivedAt())
+                .location(request.getLocation())
+                .build();
+        rawEventRepository.save(rawEvent);
 
         // Load current state for this shipment
         Optional<ShipmentCurrentStateEntity> currentStateOpt =
                 currentStateRepository.findById(request.getShipmentId());
         ShipmentCurrentStateEntity currentState = currentStateOpt.orElse(null);
 
-        // Step 2: Resolve state transition
+        // Step 3: Resolve state transition
         ShipmentResolutionResult result = stateResolver.resolve(
                 toEventEntity(request), currentState);
 
-        // Step 3: If rejected, return early
+        // Step 4: Write audit_log entry
+        if (!result.isAccepted()) {
+            writeAuditLog(request,
+                    currentState != null ? currentState.getCurrentStatus() : null,
+                    null,
+                    AuditDecision.REJECTED,
+                    result.getRejectionReason());
+        } else if (result.getNewStatus() == null) {
+            writeAuditLog(request,
+                    currentState != null ? currentState.getCurrentStatus() : null,
+                    null,
+                    AuditDecision.NO_UPDATE,
+                    null);
+        } else {
+            writeAuditLog(request,
+                    currentState != null ? currentState.getCurrentStatus() : null,
+                    result.getNewStatus(),
+                    AuditDecision.ACCEPTED,
+                    null);
+        }
+
+        // Step 5: If rejected, return early
         if (!result.isAccepted()) {
             return EventIngestionResponse.rejected(eventId, result.getRejectionReason());
         }
@@ -74,6 +119,17 @@ public class ShipmentEventService {
         return EventIngestionResponse.accepted(eventId);
     }
 
+    /**
+     * Process a batch of events. Each event is processed individually through receiveEvent(),
+     * so one bad event does not poison the batch.
+     */
+    public BatchEventResponse receiveBatchEvents(List<ShipmentEventRequest> events) {
+        List<EventIngestionResponse> results = events.stream()
+                .map(this::receiveEvent)
+                .toList();
+        return BatchEventResponse.of(results);
+    }
+
     private ShipmentEventEntity toEventEntity(ShipmentEventRequest request) {
         return ShipmentEventEntity.builder()
                 .eventId(request.getEventId())
@@ -84,6 +140,24 @@ public class ShipmentEventService {
                 .receivedAt(request.getReceivedAt())
                 .location(request.getLocation())
                 .build();
+    }
+
+    private void writeAuditLog(ShipmentEventRequest request,
+                               com.accso.shipment.domain.ShipmentStatus previousStatus,
+                               com.accso.shipment.domain.ShipmentStatus newStatus,
+                               AuditDecision decision,
+                               String rejectionReason) {
+        AuditLogEntity auditLog = AuditLogEntity.builder()
+                .eventId(request.getEventId())
+                .shipmentId(request.getShipmentId())
+                .partner(request.getPartner())
+                .previousStatus(previousStatus)
+                .newStatus(newStatus)
+                .decision(decision)
+                .rejectionReason(rejectionReason)
+                .receivedAt(request.getReceivedAt())
+                .build();
+        auditLogRepository.save(auditLog);
     }
 
     private void updateCurrentState(String shipmentId, ShipmentResolutionResult result) {
@@ -115,7 +189,6 @@ public class ShipmentEventService {
 
     /**
      * Get full event history for a shipment, ordered by receivedAt ascending.
-     * Queries the derived_events table.
      */
     @Transactional(readOnly = true)
     public List<ShipmentEventResponse> getEventHistory(String shipmentId) {
@@ -129,6 +202,27 @@ public class ShipmentEventService {
                         .occurredAt(event.getOccurredAt())
                         .receivedAt(event.getReceivedAt())
                         .location(event.getLocation())
+                        .build())
+                .toList();
+    }
+
+    /**
+     * Get audit log for a shipment, ordered by createdAt ascending.
+     */
+    @Transactional(readOnly = true)
+    public List<AuditLogResponse> getAuditLog(String shipmentId) {
+        return auditLogRepository.findByShipmentIdOrderByCreatedAtAsc(shipmentId)
+                .stream()
+                .map(audit -> AuditLogResponse.builder()
+                        .eventId(audit.getEventId())
+                        .shipmentId(audit.getShipmentId())
+                        .partner(audit.getPartner())
+                        .previousStatus(audit.getPreviousStatus())
+                        .newStatus(audit.getNewStatus())
+                        .decision(audit.getDecision().name())
+                        .rejectionReason(audit.getRejectionReason())
+                        .receivedAt(audit.getReceivedAt())
+                        .createdAt(audit.getCreatedAt())
                         .build())
                 .toList();
     }
