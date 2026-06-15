@@ -16,3 +16,10 @@ spring:
 
 server:
   port: 8080
+
+retention:
+  raw-event-days: 30
+  audit-log-days: 365
+  batch-size: 1000
+  raw-event-cron: "0 0 2 * * *"
+  audit-log-cron: "0 0 4 * * *"

@@ -1,5 +1,6 @@
 package com.accso.shipment.controller;
 
+import com.accso.shipment.dto.BatchEventRequest;
 import com.accso.shipment.dto.EventIngestionResponse;
 import com.accso.shipment.dto.ShipmentEventRequest;
 import com.accso.shipment.domain.ShipmentStatus;
@@ -122,7 +123,6 @@ class ShipmentIntegrationTest {
     void getEventHistory_returnsEventsOrderedByReceivedAt() throws Exception {
         String shipmentId = "ship-history-" + System.nanoTime();
 
-        // First event: LABEL_CREATED
         ShipmentEventRequest evt1 = ShipmentEventRequest.builder()
                 .eventId("evt-hist-1")
                 .partner("dhl")
@@ -132,7 +132,6 @@ class ShipmentIntegrationTest {
                 .receivedAt(Instant.parse("2026-06-13T08:00:00Z"))
                 .build();
 
-        // Second event: HANDED_TO_CARRIER (valid transition)
         ShipmentEventRequest evt2 = ShipmentEventRequest.builder()
                 .eventId("evt-hist-2")
                 .partner("dhl")
@@ -142,7 +141,6 @@ class ShipmentIntegrationTest {
                 .receivedAt(Instant.parse("2026-06-13T09:00:00Z"))
                 .build();
 
-        // Third event: DELIVERED (invalid transition from HANDED_TO_CARRIER - rejected)
         ShipmentEventRequest evt3 = ShipmentEventRequest.builder()
                 .eventId("evt-hist-3")
                 .partner("dhl")
@@ -168,7 +166,6 @@ class ShipmentIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.accepted").value(false));
 
-        // Retrieve history
         MvcResult result = mockMvc.perform(get("/api/v1/shipments/" + shipmentId + "/events"))
                 .andExpect(status().isOk())
                 .andReturn();
@@ -178,15 +175,10 @@ class ShipmentIntegrationTest {
                 objectMapper.getTypeFactory().constructCollectionType(List.class, Object.class));
 
         assertEquals(2, events.size());
-
-        // Only accepted events in derived_events, ordered by receivedAt
         assertEquals("evt-hist-1", ((java.util.Map) events.get(0)).get("eventId"));
         assertEquals("LABEL_CREATED", ((java.util.Map) events.get(0)).get("status"));
-
         assertEquals("evt-hist-2", ((java.util.Map) events.get(1)).get("eventId"));
         assertEquals("HANDED_TO_CARRIER", ((java.util.Map) events.get(1)).get("status"));
-
-        // Note: evt-hist-3 (DELIVERED) was rejected and is NOT stored.
     }
 
     @Test
@@ -200,5 +192,113 @@ class ShipmentIntegrationTest {
                 objectMapper.getTypeFactory().constructCollectionType(List.class, Object.class));
 
         assertTrue(events.isEmpty());
+    }
+
+    @Test
+    void receiveBatchEvents_processesMultipleEvents() throws Exception {
+        List<ShipmentEventRequest> events = List.of(
+                createEventRequest("batch-evt-1", "ship-batch-1", ShipmentStatus.LABEL_CREATED),
+                createEventRequest("batch-evt-2", "ship-batch-1", ShipmentStatus.HANDED_TO_CARRIER)
+        );
+        BatchEventRequest batchRequest = BatchEventRequest.builder().events(events).build();
+
+        mockMvc.perform(post("/api/v1/shipments/events/list")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(batchRequest)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalReceived").value(2))
+                .andExpect(jsonPath("$.acceptedCount").value(2))
+                .andExpect(jsonPath("$.rejectedCount").value(0));
+    }
+
+    @Test
+    void receiveBatchEvents_handlesDuplicatesWithinBatch() throws Exception {
+        List<ShipmentEventRequest> events = List.of(
+                createEventRequest("batch-dup-1", "ship-batch-dup", ShipmentStatus.LABEL_CREATED),
+                createEventRequest("batch-dup-1", "ship-batch-dup", ShipmentStatus.LABEL_CREATED)
+        );
+        BatchEventRequest batchRequest = BatchEventRequest.builder().events(events).build();
+
+        mockMvc.perform(post("/api/v1/shipments/events/list")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(batchRequest)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalReceived").value(2))
+                .andExpect(jsonPath("$.acceptedCount").value(1))
+                .andExpect(jsonPath("$.duplicateCount").value(1));
+    }
+
+    @Test
+    void receiveBatchEvents_atomicPerEvent() throws Exception {
+        List<ShipmentEventRequest> events = List.of(
+                createEventRequest("batch-atomic-1", "ship-batch-atomic", ShipmentStatus.LABEL_CREATED),
+                createEventRequest("batch-atomic-2", "ship-batch-atomic", ShipmentStatus.DELIVERED)
+        );
+        BatchEventRequest batchRequest = BatchEventRequest.builder().events(events).build();
+
+        mockMvc.perform(post("/api/v1/shipments/events/list")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(batchRequest)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalReceived").value(2))
+                .andExpect(jsonPath("$.acceptedCount").value(1))
+                .andExpect(jsonPath("$.rejectedCount").value(1));
+    }
+
+    @Test
+    void getAuditLog_returnsDecisionHistory() throws Exception {
+        String shipmentId = "ship-audit-" + System.nanoTime();
+
+        ShipmentEventRequest evt1 = ShipmentEventRequest.builder()
+                .eventId("audit-evt-1")
+                .partner("dhl")
+                .shipmentId(shipmentId)
+                .status(ShipmentStatus.LABEL_CREATED)
+                .occurredAt(Instant.parse("2026-06-15T08:00:00Z"))
+                .receivedAt(Instant.parse("2026-06-15T08:00:00Z"))
+                .build();
+
+        ShipmentEventRequest evt2 = ShipmentEventRequest.builder()
+                .eventId("audit-evt-2")
+                .partner("dhl")
+                .shipmentId(shipmentId)
+                .status(ShipmentStatus.HANDED_TO_CARRIER)
+                .occurredAt(Instant.parse("2026-06-15T09:00:00Z"))
+                .receivedAt(Instant.parse("2026-06-15T09:00:00Z"))
+                .build();
+
+        mockMvc.perform(post("/api/v1/shipments/events")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(evt1)))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(post("/api/v1/shipments/events")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(evt2)))
+                .andExpect(status().isOk());
+
+        MvcResult result = mockMvc.perform(get("/api/v1/shipments/" + shipmentId + "/audit"))
+                .andExpect(status().isOk())
+                .andReturn();
+
+        List<?> entries = objectMapper.readValue(
+                result.getResponse().getContentAsString(),
+                objectMapper.getTypeFactory().constructCollectionType(List.class, Object.class));
+
+        assertEquals(2, entries.size());
+        assertEquals("ACCEPTED", ((java.util.Map) entries.get(0)).get("decision"));
+        assertEquals("ACCEPTED", ((java.util.Map) entries.get(1)).get("decision"));
+    }
+
+    private ShipmentEventRequest createEventRequest(String eventId, String shipmentId, ShipmentStatus status) {
+        return ShipmentEventRequest.builder()
+                .eventId(eventId)
+                .partner("dhl")
+                .shipmentId(shipmentId)
+                .status(status)
+                .occurredAt(Instant.now())
+                .receivedAt(Instant.now())
+                .location("TestLocation")
+                .build();
     }
 }
