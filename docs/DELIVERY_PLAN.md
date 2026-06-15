@@ -15,15 +15,19 @@
 - Single-partner event ingestion endpoint (HTTPS POST)
 - Canonical event model and normalisation
 - Deduplication logic (per-partner `eventId`)
-- Out-of-order event handling with `occurredAt` ordering and `receivedAt` tiebreaker
+- Out-of-order event handling with `receivedAt` ordering
 - Conflict resolution rules engine (deterministic, stateless)
 - Append-only event store with audit trail
 - Current state derivation per shipment
 - Queryable current state by `shipmentId`
+- Batch ingestion (bare array of events, auto-detected)
+- Raw event store with 30-day retention (legal requirement)
+- Audit decision log with 1-year retention (legal requirement)
+- Scheduled retention cleanup jobs
 
 ### Minimum Credible First Slice
 
-An ingestion endpoint with normalisation, deduplication, state derivation, and tests. No CI/CD infrastructure, no metrics dashboard, no containerisation beyond what directly supports the slice.
+An ingestion endpoint with normalisation, deduplication, batch processing, state derivation, retention cleanup, and tests. No CI/CD infrastructure, no metrics dashboard, no containerisation beyond what directly supports the slice.
 
 ### Success Signals
 
@@ -32,10 +36,13 @@ An ingestion endpoint with normalisation, deduplication, state derivation, and t
 - Conflicting events are resolved by the rules engine; terminal states (`DELIVERED`, `RETURNED`) are enforced
 - Current state is queryable by `shipmentId`
 - Audit trail explains every state derivation decision
+- Batch ingestion processes each event independently; one bad event does not poison the batch
+- Raw events are deleted after 30 days; audit log entries are deleted after 1 year
+- Terminal-state shipments are exempt from retention cleanup
 
 ### Duration
 
-Approximately 1–2 weeks for a solo developer, assuming no blocking dependencies.
+Approximately 2–3 weeks for a solo developer, assuming no blocking dependencies. The addition of batch processing and retention cleanup increases scope from the original estimate.
 
 ---
 
@@ -45,6 +52,8 @@ To be planned via formal change request. Expected areas:
 
 - Metrics, alerting, and observability
 - Hosting model finalisation and production deployment
+- Multi-partner normalisation layer (partner-specific payload mapping)
+- Grace window for out-of-order events
 
 ---
 
@@ -54,4 +63,5 @@ To be planned via formal change request. Expected areas:
 |------------|-------|-------|
 | Partner API contract | Courier partner | Needed for normalisation layer |
 | Tech stack decisions | Engineering | Must be justified and documented |
-| Open questions resolved | Client | Shipment ID lifecycle, grace window, courier-specific rules |
+| Open questions resolved | Client | Second courier timeline, out-of-order frequency, grace window |
+| Legal retention confirmation | Legal & Compliance | 30-day raw / 1-year audit must be confirmed as firm requirement |
