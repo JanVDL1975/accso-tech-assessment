@@ -127,7 +127,7 @@ flowchart TD
 |----------|-----------|
 | Canonical event model at ingestion | Isolates partner-specific payload format from core logic; new partners require only a new normaliser |
 | Per-partner deduplication key `(eventId, partner)` | Handles partner-scoped IDs without requiring globally unique event IDs |
-| `occurredAt` for ordering, `receivedAt` as tiebreaker | Uses the partner's own timestamp as the authoritative signal; `receivedAt` resolves ambiguity |
+| `receivedAt` for ordering, `occurredAt` for audit | Uses the partner's ingestion timestamp as the authoritative signal; `occurredAt` is stored for audit only |
 | Deterministic, stateless resolution engine | Identical event sequences always produce identical state; easy to test and reason about |
 | Append-only event store with derived current state | Complete history preserved for audit and replay; current state available via fast query |
 | Audit trail records every decision | Full traceability: why state changed or didn't change is always explainable |

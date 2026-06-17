@@ -31,10 +31,11 @@ public class DefaultShipmentStateResolver implements ShipmentStateResolver {
         }
 
         ShipmentStatus currentStatus = current.getCurrentStatus();
-        Instant currentLastOccurredAt = current.getLastOccurredAt();
+        Instant currentLastReceivedAt = current.getLastReceivedAt();
 
-        // Rule 2 - Out-of-Order Events: If incoming event occurred earlier, don't update state
-        if (incomingOccurredAt.isBefore(currentLastOccurredAt)) {
+        // Rule 2 - Out-of-Order Events: If incoming event's receivedAt is earlier than current, don't update state
+        // Uses receivedAt (not occurredAt) as the authoritative timestamp per ADR-001
+        if (incomingReceivedAt.isBefore(currentLastReceivedAt)) {
             return ShipmentResolutionResult.noUpdate();
         }
 
