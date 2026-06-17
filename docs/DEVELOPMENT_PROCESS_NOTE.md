@@ -59,6 +59,6 @@ I committed changes to GitHub systematically as I progressed.
 **Example where my judgment differed from the AI's suggestion:**  
 AI implemented ingestion using separate endpoints for batching and single events. I changed it to make use of a single endpoint that receives both types. I introduced the changes using AI and then retested. 
 
-AI did not understand the distinction between receivedAt and occurredAt in the real world scenario. It suggested using receivedAt for the ordering. I used my judgement and changed it to occurredAt since it is considered as the time of the event happening. 
+AI initially followed the brief at face value and used `occurredAt` for ordering — the timestamp of when the event happened in the courier's system. The client's Q&A flagged that `occurredAt` is untrustworthy: it is partner-supplied and can suffer from clock skew, varying precision, and backfilled timestamps. I used my judgement and updated ADR-001 to specify `receivedAt` as the authoritative ordering signal. However, the resolver code was not updated to match the ADR — this is a confirmed bug (GitHub issue open) being fixed in the current sprint. 
 
 
