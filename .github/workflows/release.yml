@@ -54,4 +54,4 @@ jobs:
 
       - name: Maven Release
         timeout-minutes: 20
-        run: mvn -B release:prepare release:perform
+        run: mvn -B release:prepare
