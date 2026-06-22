@@ -11,6 +11,7 @@
 - [How would a separate correction ingestion point with authorization work?](#how-would-a-separate-correction-ingestion-point-with-authorization-work)
 - [Grace window for Partner B — implemented or not?](#grace-window-for-partner-b--implemented-or-not)
 - [SQLite vs PostgreSQL — when to migrate and how?](#sqlite-vs-postgresql--when-to-migrate-and-how)
+- [Would the repository layer change if PostgreSQL was introduced?](#would-the-repository-layer-change-if-postgresql-was-introduced)
 - [Why not Kafka?](#why-not-kafka)
 - [Append-only store with mutable current state — why not compute on every query?](#append-only-store-with-mutable-current-state--why-not-compute-on-every-query)
 - [Crash during processing — event written but state not updated](#crash-during-processing--event-written-but-state-not-updated)
@@ -63,7 +64,13 @@
 
 ---
 
-**SQLite vs PostgreSQL:** SQLite single-writer is the bottleneck at ~500–1000 writes/s. Trigger: agreed volume threshold, not discovery under pressure. Migration: feature flag, parallel run, cutover write path, migrate data, remove SQLite. Schema managed via Flyway/Liquibase.
+**SQLite vs PostgreSQL:** SQLite single-writer is the bottleneck at ~500–1000 writes/s. Trigger: agreed volume threshold, not discovery under pressure. Migration: feature flag, parallel run, cutover write path, migrate data, remove SQLite. Schema managed via Flyway/Liquibase. Repository interfaces unchanged — only dialect and connection pool config change.
+
+---
+
+**Repository layer and PostgreSQL:** Repository interfaces stay the same — Spring Data JPA generates queries from method names regardless of database. What changes: dialect, connection pool, raw SQL with SQLite-specific functions. Service layer is unaffected.
+
+---
 
 ---
 
@@ -607,6 +614,24 @@ void applyCorrection(String shipmentId, CorrectionRequest request) {
 The schema is not complex — `raw_events`, `derived_events`, `audit_log`, `shipment_current_state`. A Flyway or Liquibase migration script handles the schema creation cleanly.
 
 **What changes.** Connection pool configuration (HikariCP), dialect (`SQLiteDialect` → `PostgreSQLDialect`), and any raw SQL that relies on SQLite-specific functions. The repository interfaces stay the same.
+
+---
+
+## Would the repository layer change if PostgreSQL was introduced?
+
+The repository **interfaces** — the method names and return types — would not change. Spring Data JPA generates queries from method names regardless of which database is underneath. The service layer calls the same methods; it doesn't know or care which database is running.
+
+**What would change:**
+
+| Component | Change |
+|-----------|--------|
+| **Dialect** | `SQLiteDialect` → `PostgreSQLDialect` in Hibernate config |
+| **Connection pool** | HikariCP settings tuned for PostgreSQL |
+| **Sequence generation** | `@GeneratedValue(strategy = GenerationType.IDENTITY)` works in both; PostgreSQL often uses `GenerationType.SEQUENCE` instead |
+| **Raw SQL in `@Query`** | Any SQLite-specific functions would need rewriting (e.g., `date('now')` → `NOW()`) |
+| **Boolean mapping** | SQLite stores booleans as 0/1; PostgreSQL has native boolean — Hibernate handles this automatically |
+
+**The key point:** the repository interfaces are the abstraction boundary. The architecture isolates persistence behind them — change the database, change the dialect and connection config, the repositories and service layer are untouched.
 
 ---
 
