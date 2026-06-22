@@ -2,23 +2,61 @@
 
 | # | Section |
 |---|---------|
-| 1 | Your Assumptions and Where the Brief Was Underspecified |
-| 2 | What You Would Clarify with the Client Before Committing a Team |
-| 3 | Why You Structured the Delivery Plan the Way You Did |
-| 4 | How Your Architecture and Plan Changed After the Mandatory Change Request |
-| 5 | What You Would Postpone Even If the Client Pushed for More Scope |
-| 6 | What Kind of Architecture Is This? |
-| 7 | How Would You Scale This? |
-| 8 | Security |
-| 9 | Availability |
-| 10 | Reliability |
-| 11 | Performance |
-| 12 | Cost |
-| 13 | Maintainability |
-| 14 | Where the Architecture Is Most Likely to Fail Under Real Organizational Constraints |
-| 15 | What AI Accelerated and What Still Required Your Judgment |
-| 16 | Bug #5 — How It Slipped Through and What It Reveals |
-| 17 | How You Would Present the Strategy to a Non-Technical Client Stakeholder |
+| 1 | [Your Assumptions and Where the Brief Was Underspecified](#1-your-assumptions-and-where-the-brief-was-underspecified) |
+| 2 | [What You Would Clarify with the Client Before Committing a Team](#2-what-you-would-clarify-with-the-client-before-committing-a-team) |
+| 3 | [Why You Structured the Delivery Plan the Way You Did](#3-why-you-structured-the-delivery-plan-the-way-you-did) |
+| 4 | [How Your Architecture and Plan Changed After the Mandatory Change Request](#4-how-your-architecture-and-plan-changed-after-the-mandatory-change-request) |
+| 5 | [What You Would Postpone Even If the Client Pushed for More Scope](#5-what-you-would-postpone-even-if-the-client-pushed-for-more-scope) |
+| 6 | [What Kind of Architecture Is This?](#6-what-kind-of-architecture-is-this) |
+| 7 | [How Would You Scale This?](#7-how-would-you-scale-this) |
+| 8 | [Security](#8-security) |
+| 9 | [Availability](#9-availability) |
+| 10 | [Reliability](#10-reliability) |
+| 11 | [Performance](#11-performance) |
+| 12 | [Cost](#12-cost) |
+| 13 | [Maintainability](#13-maintainability) |
+| 14 | [Where the Architecture Is Most Likely to Fail Under Real Organizational Constraints](#14-where-the-architecture-is-most-likely-to-fail-under-real-organizational-constraints) |
+| 15 | [What AI Accelerated and What Still Required Your Judgment](#15-what-ai-accelerated-and-what-still-required-your-judgment) |
+| 16 | [Bug #5 — How It Slipped Through and What It Reveals](#16-bug-5--how-it-slipped-through-and-what-it-reveals) |
+| 17 | [How You Would Present the Strategy to a Non-Technical Client Stakeholder](#17-how-you-would-present-the-strategy-to-a-non-technical-client-stakeholder) |
+
+---
+
+**Section Summaries**
+
+**1 — Your Assumptions:** Deduplication key is `(partner, eventId)`; timestamp authority is `receivedAt` for Partner B but `occurredAt` was original default; retention was not in original scope; Partner B batching was a change request item.
+
+**2 — What to Clarify:** Deduplication edge case (same ID, different payload); grace window duration; terminal state correction workflow; SQLite migration threshold; Partner B onboarding scope; retention legal edge cases.
+
+**3 — Delivery Plan Structure:** Phase 1 centralises authoritative logic for one partner; core loop (dedup + ordering + resolution) is tested together; flat Phase 1 avoids early interface definition; Phase 2 deliberately underspecified until Partner B data arrives.
+
+**4 — Change Request Impact:** Single endpoint replaced dual endpoints; three event stores replaced one (raw, derived, audit); `@EnableScheduling` re-added; ordering corrected from `occurredAt` to `receivedAt` in ADR but not yet in code.
+
+**5 — What to Postpone:** Multi-partner normalisation until real Partner B data; grace window until calibrated; metrics dashboard until correctness is proven; full CI/CD pipeline; snapshot compaction.
+
+**6 — Architecture Type:** API-centric synchronous event processing, not Kafka-style streaming. Append-only store enables audit and recomputation but queries hit derived current state, not replay.
+
+**7 — Scaling:** SQLite single-writer is first bottleneck → PostgreSQL migration; read path scales horizontally; partition by partner if volumes diverge; Kafka only when multi-consumer streaming is needed.
+
+**8 — Security:** Webhook authentication undefined; partner-specific payload validation deferred; partner isolation by query convention not DB enforcement; audit log integrity relies on access control, not cryptography.
+
+**9 — Availability:** SQLite single instance = single point of failure; no HA, no failover; events lost during downtime; partner retry window is only guarantee.
+
+**10 — Reliability:** Crash between event write and state update leaves stale state; no automatic repair mechanism; duplicate retries handled by deduplication; event loss if partner retry window closes.
+
+**11 — Performance:** Reads fast with indexes; writes serialised (SQLite) ~500–1000/s; O(1) for deduplication and state updates; history queries need index on `receivedAt`.
+
+**12 — Cost:** Phase 1 runs on a single t3.medium; no managed services; PostgreSQL migration adds ~$15/month; `derived_events` storage grows indefinitely without retention policy.
+
+**13 — Maintainability:** Flat package structure fine for thin slice; audit trail is primary debug tool; no metrics or alerting in Phase 1; Hibernate schema management not production-grade; resolver pluggability exists but no partner-specific implementations yet.
+
+**14 — Failure Points:** Terminal state corrections have no first-class mechanism; Partner B out-of-order rate unknown; SQLite write bottleneck before migration; retention cleanup can contend with live traffic; pluggable resolver needs partner implementations not yet built.
+
+**15 — AI vs Human:** AI accelerated diagrams, documentation structure, and well-specified code. AI did not accelerate: requirements extraction, timestamp authority trade-off, spotting output mismatches, judging what not to build.
+
+**16 — The Bug:** ADR-001 updated to `receivedAt` but resolver code still used `occurredAt`; tests set both timestamps identically so bug was invisible; fix: update resolver, add regression test with divergent timestamps.
+
+**17 — Stakeholder Framing:** Store everything, use only what matters; system knows when not to trust an event; phased delivery validates approach before full build; legal retention explained clearly.
 
 ---
 

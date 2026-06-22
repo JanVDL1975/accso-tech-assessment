@@ -1,5 +1,132 @@
 # Interview Questions
 
+## Index
+
+- [What was underspecified in brief?](#what-was-underspecified-in-brief)
+- [Why is event storage split into raw_events, derived_events, and audit_log?](#why-is-event-storage-split-into-raw_events-derived_events-and-audit_log)
+- [The `receivedAt` bug — how it slipped through and what it reveals](#the-receivedat-bug--how-it-slipped-through-and-what-it-reveals)
+- [Deduplication: code check vs database constraint](#deduplication-code-check-vs-database-constraint)
+- [Terminal states — what happens when a correction is needed?](#terminal-states--what-happens-when-a-correction-is-needed)
+- [How would the architecture change if a correction event type was implemented?](#how-would-the-architecture-change-if-a-correction-event-type-was-implemented)
+- [How would a separate correction ingestion point with authorization work?](#how-would-a-separate-correction-ingestion-point-with-authorization-work)
+- [Grace window for Partner B — implemented or not?](#grace-window-for-partner-b--implemented-or-not)
+- [SQLite vs PostgreSQL — when to migrate and how?](#sqlite-vs-postgresql--when-to-migrate-and-how)
+- [Why not Kafka?](#why-not-kafka)
+- [Append-only store with mutable current state — why not compute on every query?](#append-only-store-with-mutable-current-state--why-not-compute-on-every-query)
+- [Crash during processing — event written but state not updated](#crash-during-processing--event-written-but-state-not-updated)
+- [Permissive state machine — why not require LABEL_CREATED first and every intermediate state?](#permissive-state-machine--why-not-require-label_created-first-and-every-intermediate-state)
+- [What invariants does the permissive state machine actually enforce?](#what-invariants-does-the-permissive-state-machine-actually-enforce)
+- [Courier adapter layer — normalizing heterogeneous event formats](#courier-adapter-layer--normalizing-heterogeneous-event-formats)
+- [Could you enforce a single input event structure through OpenAPI instead?](#could-you-enforce-a-single-input-event-structure-through-openapi-instead)
+- [What happens if a batch partner sends a spreadsheet instead of JSON?](#what-happens-if-a-batch-partner-sends-a-spreadsheet-instead-of-json)
+- [Batch ingestion — transactional or event-by-event?](#batch-ingestion--transactional-or-event-by-event)
+- [What changes when a partner requires batch-level acknowledgement?](#what-changes-when-a-partner-requires-batch-level-acknowledgement)
+- [Schema migration — no Flyway/Liquibase, is that a production risk?](#schema-migration--no-flywayliquibase-is-that-a-production-risk)
+- [Partner isolation — can a buggy partner corrupt another partner's data?](#partner-isolation--can-a-buggy-partner-corrupt-another-partners-data)
+- [What AI got wrong — beyond the `receivedAt` bug](#what-ai-got-wrong--beyond-the-receivedat-bug)
+- [Could the thin slice have been leaner — just the engine, no endpoints or persistence?](#could-the-thin-slice-have-been-leaner--just-the-engine-no-endpoints-or-persistence)
+- [What other approaches exist for the core problem — and why they weren't done](#what-other-approaches-exist-for-the-core-problem--and-why-they-werent-done)
+
+---
+
+**Section Summaries**
+
+**What was underspecified:** Deduplication key scoped per partner; authoritative timestamp was `occurredAt` initially but changed to `receivedAt`; out-of-order handling stores older events without updating state; conflict resolution via pluggable `ShipmentStateResolver`; batch per-event isolation; API endpoints defined as webhook + query; SQLite chosen; terminal states block all transitions; retention (30-day raw, 1-year audit) added via change request.
+
+---
+
+**Split event storage:** Three stores serve different purposes — raw (legal, 30-day), derived (canonical, indefinite), audit (decisions, 1-year). Code check and DB constraint handle deduplication at different layers. `derived_events` has no uniqueness constraint; it relies on `raw_events` as the gate.
+
+---
+
+**The `receivedAt` bug:** ADR-001 was updated to `receivedAt` for Partner B ordering, but resolver code still used `occurredAt`. Tests set both timestamps identically so the bug was invisible. Fix: update resolver, add regression test with divergent timestamps. Root cause: doc-to-code gap, not a testing gap per se.
+
+---
+
+**Deduplication: code vs DB:** Code check returns structured response with logging for the API contract. DB constraint is the integrity backstop — prevents silent duplicates if code has a bug or concurrent write occurs. Both layers necessary.
+
+---
+
+**Terminal state corrections:** No first-class correction mechanism exists. Options: manual DB update (bypasses audit) or new `CORRECTION` event type (flows through normal path with its own transition rules). Without a defined process, engineers make ad hoc fixes that bypass audit.
+
+---
+
+**Correction event type architecture:** Event type field added to entity and DTO. Resolver branches on `eventType` — corrections bypass state machine. Admin endpoint with operator authentication separate from normal webhook. Audit enriched with `authorisedBy`, `correctionReason`. Terminal states become non-terminal via correction path.
+
+---
+
+**Correction endpoint design:** Separate `POST /admin/corrections` with bearer token auth. State machine not consulted — direct write to `current_state`. Same audit log table, same retention policy. Raw events and derived events not written — corrections are administrative overrides, not courier events.
+
+---
+
+**Grace window:** Not implemented. Hard out-of-order rule: older `receivedAt` does not update state. Grace window deferred to Phase 2 — needs calibration against observed Partner B out-of-order rate. Interactions with corrections: corrections should invalidate held events (correction wins).
+
+---
+
+**SQLite vs PostgreSQL:** SQLite single-writer is the bottleneck at ~500–1000 writes/s. Trigger: agreed volume threshold, not discovery under pressure. Migration: feature flag, parallel run, cutover write path, migrate data, remove SQLite. Schema managed via Flyway/Liquibase.
+
+---
+
+**Why not Kafka:** Single consumer, synchronous webhook, no distributed log needed. Brief didn't ask for it. Would add cluster management, consumer groups, partitioning strategy — significant infrastructure for a thin slice. Right migration target when multiple independent consumers need the stream.
+
+---
+
+**Append-only vs compute-on-query:** O(1) status queries via derived current state vs O(n) replay per query. Append-only event store enables recomputation if state drifts. Trade-off: small window where event is written but state not yet updated after crash.
+
+---
+
+**Crash between write and state update:** Event in `derived_events` but `current_state` stale. Recovery: next event for that shipment triggers recomputation. If no further events, stale state persists. No automated repair job. Append-only store is the recomputation primitive.
+
+---
+
+**Permissive state machine:** First event need not be `LABEL_CREATED`. Intermediate states need not be visited. `LABEL_CREATED → IN_TRANSIT` is valid. Chosen over strict enforcement because partners don't always send every step. Trade-off: missing events are accepted as gaps, not inferred.
+
+---
+
+**State machine invariants:** Structural invariant kept (valid states, valid transitions). Temporal completeness invariant removed (no enforced sequence). System enforces "next state ∈ allowed transitions" but not "every intermediate state must appear." Enforced invariant is weaker but more realistic.
+
+---
+
+**Courier adapter layer:** Adapter per courier normalises heterogeneous formats to canonical event. Raw events stored before parsing — audit trail regardless of parse success. Adapter interface: `supports(partner)` + `normalize(rawPayload)`. Raw event is the boundary of trust; everything after works only with canonical format.
+
+---
+
+**OpenAPI vs adapters:** OpenAPI enforces internal schema, not external courier formats. Couriers won't change their systems to match your spec. Adapter layer is the general solution because you cannot dictate terms to established carriers. OpenAPI validates canonical format inside your system, not the external input.
+
+---
+
+**Spreadsheet upload:** Content-Type negotiation needed. Store raw before parsing — raw bytes stored even if parse fails. Options: file-based SFTP integration, API gateway transformation, or in-service format detection. Spreadsheet upload is typically human-initiated batch, different interaction model from webhook.
+
+---
+
+**Batch ingestion:** Per-event isolation — one bad event doesn't poison the batch. Events processed independently, partial success possible. Caller handles retries for failed events. Acceptable for Partner B's retry window.
+
+---
+
+**Batch atomicity:** All-or-nothing requires outer transaction wrapping entire batch. Per-event deduplication insufficient for atomic batch semantics — need `batchId` tracking. Lock hold duration extends to full batch. Raw events inside batch transaction are rolled back on failure. On retry, cached `batchId` result returned without reprocessing.
+
+---
+
+**Schema migration:** Hibernate `ddl-auto` not production-grade — implicit schema changes, no rollback path. Risks: column rename loses data, no migration history. Flyway or Liquibase needed before production. Initial migration scripts are half-day effort for this simple schema.
+
+---
+
+**Partner isolation:** Processing isolated by `(eventId, partner)` key. No DB-level enforcement — repository query convention only. Bug in query omitting `partner` filter could cross-contaminate data. At this scale, code discipline sufficient. Larger scale needs row-level security or separate schemas.
+
+---
+
+**What AI got wrong:** Separate endpoints for single/batch (collapsed by change request). Documentation described components that didn't exist in code. Requirements interpretation — treated ambiguities as decisions to make rather than questions to raise. Prompt didn't include Q&A context about timestamp reliability. Suggested speculative documentation beyond brief scope.
+
+---
+
+**Thin slice leanness:** Could have been a single `ShipmentResolver` class with in-memory maps, no Spring, no HTTP, no DB. Better demonstration of core algorithm. Current version is a better demonstration of a runnable service. Lean version is the better interview answer because it shows what the core actually is vs infrastructure around it.
+
+---
+
+**Alternative approaches:** Event sourcing (O(n) queries, history is not primary read), CRDTs (solves concurrent writes not single-writer ordering), Saga (overkill for single-service problem), Batch ETL (introduces staleness), Blockchain (no multi-party consensus needed), MDM platforms (enterprise heavyweight for targeted domain problem).
+
+---
+
 ## What was underspecified in brief?
 
 The requirements described the problem space clearly but left many implementation decisions open. The table below shows the most consequential gaps and how they were resolved.
@@ -997,3 +1124,115 @@ The bigger practical risk is a partner sending events that are structurally vali
 **What not to build.** When AI suggested adding a "Key Concepts" section to the README, I judged it would add speculative content beyond what the brief required. The principle of minimum code applies to documentation too.
 
 The pattern: AI is effective for well-specified, deterministic tasks with clear inputs and outputs. It struggles with ambiguity, trade-off reasoning, and knowing when the problem definition has changed. The `receivedAt` bug is the clearest example — the prompt described the rules correctly but did not encode the Q&A context about timestamp reliability, which existed in a separate document.
+
+---
+
+## Could the thin slice have been leaner — just the engine, no endpoints or persistence?
+
+Yes. The thin slice could have been a single class with no Spring, no HTTP, no database.
+
+```java
+public class ShipmentResolver {
+    private final Map<String, ShipmentState> currentState = new HashMap<>();
+    private final Map<String, List<ShipmentEvent>> eventHistory = new ConcurrentHashMap<>();
+
+    public ResolutionResult resolve(ShipmentEvent incoming, String shipmentId) { ... }
+    public ShipmentState getCurrentState(String shipmentId) { ... }
+    public List<ShipmentEvent> getHistory(String shipmentId) { ... }
+}
+```
+
+Tests pass events directly via method call, not HTTP:
+
+```java
+@Test
+void acceptsValidTransition() {
+    ShipmentResolver resolver = new ShipmentResolver();
+    resolver.resolve(event("IN_TRANSIT"), "ship-1");
+    assertEquals(IN_TRANSIT, resolver.getCurrentState("ship-1").status());
+}
+```
+
+**What the current thin slice includes that the leaner version would omit:**
+
+| Component | Included in current slice | Lean option |
+|-----------|-------------------------|-------------|
+| HTTP endpoints | ✅ | ❌ — method call only |
+| SQLite persistence | ✅ | ❌ — in-memory maps |
+| Spring Boot application | ✅ | ❌ — plain Java class |
+| Deduplication via DB constraint | ✅ | ❌ — Map-based |
+| Event normalization | ✅ | Could be included |
+| Resolution engine | ✅ | ✅ Core of both |
+
+**Why the current slice went further:**
+
+The OVERVIEW says "one small but meaningful piece (e.g. event normalization, deduplication, state derivation, or conflict resolution) — executable and testable." The current slice includes all of those, plus the infrastructure to make it a runnable microservice.
+
+**Which is the better thin slice:**
+
+The leaner version is a better demonstration of the core algorithm in isolation — pure unit tests, no infrastructure dependencies, fast to run, easy to understand. The current version is a better demonstration of a runnable service — shows how the logic integrates with HTTP and persistence.
+
+Both are valid interpretations of "thin slice." The leaner version would have been the right choice if the goal was to explain and test the resolution algorithm quickly. The current version was the right choice if the goal was to demonstrate a deployable service from the start. The leaner version is the better interview answer because it shows you understand what the core actually is versus what is infrastructure around it.
+
+---
+
+## What other approaches exist for the core problem — and why they weren't done
+
+### Event sourcing
+
+Every state change is an immutable event. Current state is derived by replaying all events. No mutable current state — it is always computed.
+
+**Why not:** Replay is O(n) per query where n = number of events. With hundreds of events per shipment, status queries would scan hundreds of rows every time. The append-only store with a derived mutable current state gives the same correctness guarantees with O(1) queries. Event sourcing makes sense when you need the full history as the primary read path — here, the current state is the primary read, history is secondary.
+
+**Defence:** "Event sourcing is the right choice when history is the read path. Here, status queries are the primary read and history is for auditing — the hybrid approach is more efficient for the actual query pattern."
+
+### CRDT-based conflict resolution
+
+Conflict-free replicated data types handle concurrent updates by merging them mathematically — last-writer-wins, set union, etc.
+
+**Why not:** CRDTs solve concurrent writes from multiple writers. This problem is not about concurrent writes — it is about authoritative ordering of events from a single partner webhook. The sequencing problem (which event happened first) is not a conflict that CRDTs solve well.
+
+**Defence:** "CRDTs handle concurrency between distributed writers. This is a single-writer problem — one courier webhook is the authoritative source. The issue is out-of-order arrival and deduplication, not conflicting concurrent writes."
+
+### Saga pattern / choreography
+
+Each step in the shipment lifecycle is a separate service that publishes events. A central orchestrator coordinates the steps.
+
+**Why not:** The saga pattern is for distributed workflows where each step is a separate microservice with its own database. The shipment integrity problem is not a multi-service workflow — it is a single service receiving events and deriving state. Introducing saga orchestration would add distributed systems complexity (compensation, rollback, orchestration state) for a problem that is fundamentally about event ordering and deduplication.
+
+**Defence:** "The saga pattern coordinates across microservices with separate data stores. This is a single service with a single data store — saga would add orchestration overhead without benefit."
+
+### ETL / batch reprocessing
+
+Events are stored raw and reprocessed periodically by a batch job to derive state.
+
+**Why not:** Batch means state is always slightly stale. For customer support and tracking queries that need current information, this is a significant degradation. Real-time event processing is the right model for this problem — every event is processed as it arrives, state is always current.
+
+**Defence:** "Batch reprocessing solves volume but introduces staleness. The use cases — customer support, tracking — need real-time answers. Batch would be appropriate if volume made real-time impossible, but e-commerce event volumes are well within real-time processing capability."
+
+### Ledger / blockchain-style immutable record
+
+Every state change is a cryptographic hash-chained entry. Full audit trail with tamper evidence.
+
+**Why not:** The append-only event store already provides immutability. The blockchain layer adds cryptographic integrity and distributed consensus — which matters when multiple parties need to agree on a shared truth without trusting a central authority. Here, there is a central authority: the service itself. Partners send events to us; we are the authority.
+
+**Defence:** "Blockchain solves the Byzantine generals problem — multiple distrusting parties agreeing on shared truth. We are the single authority. The append-only store gives us immutability. The blockchain layer would add hash chaining and distributed consensus that we don't need."
+
+### Master data management (MDM) approach
+
+Centralise all master data including shipment state into an MDM tool (Informatica, Talend, etc.)
+
+**Why not:** MDM tools are enterprise integration platforms for consolidating master data across heterogeneous systems. They are heavyweight, expensive, and designed for data stewardship at enterprise scale. The shipment integrity problem is a targeted domain problem solvable with a well-designed event store and resolver — not a data governance problem requiring an MDM platform.
+
+**Defence:** "MDM is for enterprise data consolidation across many heterogeneous source systems with stewardship workflows. This is a targeted event processing problem — the resolver approach is lighter, cheaper, and more maintainable for this specific use case."
+
+### Which approach fits best — summary
+
+| Approach | Why not chosen |
+|---------|---------------|
+| Event sourcing | O(n) queries; current state is the read path, not history |
+| CRDTs | Solves concurrent writes, not out-of-order single-writer events |
+| Saga / choreography | Overkill for a single-service problem |
+| Batch / ETL | Introduces staleness; real-time is required |
+| Blockchain / ledger | No multi-party consensus needed; single authority |
+| MDM platforms | Enterprise heavyweight for a targeted domain problem |
