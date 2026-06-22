@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   release:
@@ -23,6 +24,21 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+
+      - name: Configure Maven credentials for GitHub Packages
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml << 'EOF'
+          <settings>
+            <servers>
+              <server>
+                <id>github</id>
+                <username>github-actions[bot]</username>
+                <password>${env.GITHUB_TOKEN}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
 
       - name: Configure Git
         run: |
