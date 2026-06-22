@@ -56,11 +56,23 @@
         </dependency>
     </dependencies>
 
+    <scm>
+        <connection>scm:git:https://github.com/JanVDL1975/accso-tech-assessment.git</connection>
+        <developerConnection>scm:git:https://github.com/JanVDL1975/accso-tech-assessment.git</developerConnection>
+        <url>https://github.com/JanVDL1975/accso-tech-assessment</url>
+        <tag>HEAD</tag>
+    </scm>
+
     <build>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+			<plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-release-plugin</artifactId>
+                <version>3.0.1</version>
             </plugin>
         </plugins>
     </build>
