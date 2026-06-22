@@ -41,3 +41,6 @@ skills-lock.json
 # IDE
 .idea/
 *.iml
+
+release.properties
+pom.xml.releaseBackup
