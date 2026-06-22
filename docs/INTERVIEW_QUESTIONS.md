@@ -1,5 +1,28 @@
 # Interview Questions
 
+## What was underspecified in brief?
+
+The requirements described the problem space clearly but left many implementation decisions open. The table below shows the most consequential gaps and how they were resolved.
+
+| Underspecified Item | Resolution |
+|---------------------|-----------|
+| **Deduplication key** | FR-2 says "per-partner" but doesn't name the composite key | ADR-003: `(partner, eventId)` as the deduplication key |
+| **Authoritative ordering timestamp** | FR-3 says use `occurredAt` but acknowledges it's unreliable | ADR-001: use `receivedAt` as the authoritative ordering signal; `occurredAt` stored for audit only |
+| **Out-of-order events — what happens to older events?** | FR-3 says "use `occurredAt`" but doesn't specify what happens when older events arrive | Events with older `receivedAt` than current state are stored but **do not update current state** — history preserved |
+| **Conflict resolution mechanism** | FR-4 says "deterministic rules engine" but doesn't define the interface | `ShipmentStateResolver` pluggable interface; default resolver applies deterministic rule chain |
+| **Batch vs single-event processing** | FR mentions "courier events arrive" but not batch semantics | ADR-005: per-event isolation — each event processed independently, one bad event doesn't poison the batch |
+| **API endpoint shapes** | FR-1 to FR-7 describe capabilities but no endpoints specified | Webhook: `POST /api/v1/shipments/events`; Query: `GET /api/v1/shipments/{shipmentId}/status` |
+| **Database technology** | NFR-4: hosting/stack not prescribed | SQLite with Spring Data JPA / Hibernate |
+| **Runtime port** | Not specified | Port `8080` |
+| **Invalid transition handling** | FR-5 says invalid transitions are "rejected" | Invalid transitions are persisted but marked `rejected` in audit trail |
+| **Terminal state behaviour** | FR-4 and FR-5 imply terminal states block further updates | `DELIVERED` and `RETURNED` are terminal — all incoming events rejected, no further transitions allowed |
+| **Retention policy** | Not mentioned in requirements | ADR-006: 30-day raw events, 1-year audit log; terminal-state shipments retained indefinitely |
+| **Release/CI pipeline** | Out of scope per OVERVIEW | Split into `ci.yml` (dev push → tests → auto-PR) and `release.yml` (main push → tests → `release:prepare` tag) |
+| **Code review before merge** | Not specified | Branch protection on `main` requires PR review before merge |
+| **Auto-merge or manual** | Not specified | Manual merge after review — no auto-merge |
+
+---
+
 ## Why is event storage split into raw_events, derived_events, and audit_log?
 
 The split exists to serve two masters simultaneously: **legal compliance** and **correct system behaviour**.

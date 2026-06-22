@@ -5,6 +5,19 @@
 
 ---
 
+## Project Context
+
+The client runs an e-commerce platform that ships orders through a courier partner. A recurring integrity problem exists: downstream systems disagree about shipment state because courier events arrive late, out of order, duplicated, or with conflicting data. Customer support, order tracking, and incident response need a trustworthy view of what happened and what the current shipment status is.
+
+**Goals**
+
+- Provide a reliable, authoritative current view of each shipment
+- Maintain a queryable history of all shipment events and how the current state was derived
+- Handle the core data integrity challenges: duplicates, out-of-order arrival, and conflicting updates
+- Deliver a pragmatic, phased solution that can ship to production incrementally
+
+---
+
 ## 1. The Problem (2 minutes)
 
 ```mermaid
@@ -14,7 +27,7 @@ flowchart LR
     C["Incident Response"] --> CW
 ```
 
-> All three teams listen to the same webhook. All three try to figure out what happened and what the current state of a shipment is. They all get different answers — because duplicates, late arrivals, and conflicting updates make this genuinely hard. No one has built the authoritative answer yet.
+> All three teams listen to the same webhook. All three try to figure out what happened and what the current state of a shipment is — and each team derives the answer independently. Without a centralised service to apply the rules consistently, every team ends up with a different answer. Duplicates, late arrivals, and conflicting updates make this genuinely hard. No one has built the authoritative answer yet.
 
 ---
 
@@ -34,30 +47,7 @@ flowchart LR
 
 ---
 
-## 3. What the Service Does (3 minutes)
-
-```mermaid
-flowchart TD
-    E["Event Arrives"] --> D{"Is it a duplicate?\n(eventId + partner)"}
-    D -->|Yes| S1["Store event\nLog: DUPLICATE\nNo state change"]
-    D -->|No| O{"Is it older than\ncurrent state?\n(timestamp check)"}
-    O -->|Yes| S2["Store event\nLog: OUT_OF_ORDER\nNo state change"]
-    O -->|No| T{"Is the transition\nallowed?\n(IN_TRANSIT → DELIVERED?)"}
-    T -->|No| S3["Store event\nLog: INVALID_TRANSITION\nState unchanged"]
-    T -->|Yes| S4["Store event\nUpdate state\nLog decision"]
-```
-
-> Every event is recorded. Every decision is logged. State only moves forward through valid transitions. Nothing is deleted or overwritten.
-
-Key points to emphasise:
-- **Older event arrives?** → recorded but doesn't change anything. We keep the newer truth.
-- **Duplicate?** → recorded but ignored. Same decision every time.
-- **Invalid transition?** → recorded and rejected. State stays where it is.
-- **Terminal state (DELIVERED, RETURNED)?** → final. Nothing changes it.
-
----
-
-## 4. The Status Diagram (2 minutes)
+## 3. The Status Diagram (2 minutes)
 
 ```mermaid
 stateDiagram-v2
@@ -81,6 +71,29 @@ stateDiagram-v2
 *First event is not LABEL_CREATED:* The system accepts any valid first event. If the first event received is `IN_TRANSIT`, it is accepted. We do not require `LABEL_CREATED` to be first — courier partners don't always send the label creation event, and enforcing it would block valid shipments from being tracked.
 
 *Intermediate states are not required:* A shipment can skip intermediate states as long as the path is valid. `LABEL_CREATED → IN_TRANSIT` is fine even if `HANDED_TO_CARRIER` was never sent. We don't infer missing states — we simply accept that the current state is whatever the most recent valid event says it is.
+
+---
+
+## 4. What the Service Does (3 minutes)
+
+```mermaid
+flowchart TD
+    E["Event Arrives"] --> D{"Is it a duplicate?\n(eventId + partner)"}
+    D -->|Yes| S1["Store event\nLog: DUPLICATE\nNo state change"]
+    D -->|No| O{"Is it older than\ncurrent state?\n(timestamp check)"}
+    O -->|Yes| S2["Store event\nLog: OUT_OF_ORDER\nNo state change"]
+    O -->|No| T{"Is the transition\nallowed?\n(IN_TRANSIT → DELIVERED?)"}
+    T -->|No| S3["Store event\nLog: INVALID_TRANSITION\nState unchanged"]
+    T -->|Yes| S4["Store event\nUpdate state\nLog decision"]
+```
+
+> Every event is recorded. Every decision is logged. State only moves forward through valid transitions. Nothing is deleted or overwritten.
+
+Key points to emphasise:
+- **Older event arrives?** → recorded but doesn't change anything. We keep the newer truth.
+- **Duplicate?** → recorded but ignored. Same decision every time.
+- **Invalid transition?** → recorded and rejected. State stays where it is.
+- **Terminal state (DELIVERED, RETURNED)?** → final. Nothing changes it.
 
 ---
 
