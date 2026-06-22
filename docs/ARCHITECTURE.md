@@ -23,7 +23,6 @@ The architecture is organised around three concerns:
 graph TD
     P["Courier Partner"]
     IE["Event Ingestion<br/>(webhook endpoint)"]
-    NP["Normalisation<br/>(partner-specific mapping)"]
     DD["Deduplication<br/>(eventId + partner)"]
     RE["Resolution Engine<br/>(rules-based state derivation)"]
     ES["Event Store<br/>(append-only)"]
@@ -32,8 +31,7 @@ graph TD
     QA["Query APIs<br/>(status, history, audit)"]
 
     P --> IE
-    IE --> NP
-    NP --> DD
+    IE --> DD
     DD --> RE
     RE --> ES
     RE --> CS
@@ -43,9 +41,11 @@ graph TD
     AT --> QA
 ```
 
-### Normalisation
+### Event Ingestion
 
-Incoming events are mapped from the partner's payload format into a canonical internal model. This separates partner-specific concerns from the core processing logic.
+Incoming events are received via a single webhook endpoint that accepts both single events and batch arrays. The request body is mapped directly into the canonical `ShipmentEventRequest` model — no partner-specific transformation occurs at this stage.
+
+> **Note:** A normalisation layer (partner-specific payload mapping) is planned for a future phase to support multiple courier partners.
 
 ### Deduplication
 
