@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [ "dev" ]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Build & Test
+        run: mvn clean test -B
+
+      - name: Check if PR exists
+        id: check-pr
+        run: |
+          if gh pr list --base main --head ci/dev-to-main --state open | grep -q .; then
+            echo "PR_EXISTS=true" >> $GITHUB_OUTPUT
+          else
+            echo "PR_EXISTS=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create PR to main
+        if: steps.check-pr.outputs.PR_EXISTS == 'false'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          base: main
+          branch: ci/dev-to-main
+          title: "CI: Merge dev to main"
+          body: "Auto-generated PR from CI workflow"
+          labels: "automated"
