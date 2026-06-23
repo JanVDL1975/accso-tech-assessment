@@ -107,3 +107,51 @@ All extend `JpaRepository` — CRUD, pagination, and transactions are inherited.
 4. Valid transition → `ACCEPTED`, update state
 
 The interface allows custom resolvers per partner without modifying the core pipeline.
+
+**Adding a custom resolver:** Implement `ShipmentStateResolver`, annotate with `@Component`, and either mark it `@Primary` to make it the default, or inject it by name where needed. `ShipmentEventService` holds the interface — it doesn't know which implementation is active.
+
+**When to add a custom resolver:**
+- A partner needs different transition rules
+- A grace window needs different release logic per partner
+- Correction workflow changes resolution for certain states
+
+**Small logic changes** — edit `DefaultShipmentStateResolver` and its tests directly. No new class needed.
+
+---
+
+## DDD Alternative Structure
+
+The codebase above is organised by **technical layer** — all controllers, all services, all entities in their own packages. This is the standard Spring Boot layered architecture and is appropriate for a thin slice.
+
+**DDD (Domain-Driven Design)** organises code by **domain concept** instead. The package structure reflects the business domain, not the technical role of each class.
+
+```
+/presentation
+  /controllers  ─ HTTP endpoints
+  /dto         ─ API contracts only
+
+/application
+  /commands     ─ write use cases (CQRS)
+  /queries      ─ read use cases
+
+/domain
+  /model        ─ Aggregates, entities, value objects
+  /events       ─ Domain events
+  /services     ─ Domain services (e.g. ShipmentResolver)
+  /repositories ─ Repository interfaces (contracts)
+
+/infrastructure
+  /persistence  ─ Repository implementations
+  /messaging    ─ Domain event publishing
+```
+
+**Key shifts:**
+
+- Repository interfaces move into `/domain` — the domain declares what it needs, infrastructure implements it
+- `Shipment` becomes an **aggregate root** — it owns its state and enforces its own rules internally, rather than having state passed in and modified by external services
+- Audit trail becomes **domain events** (`ShipmentReceived`, `StatusChanged`, `EventRejected`) published to a bus rather than written directly by the service
+- Application service (`ShipmentEventService` today) becomes `/application` — orchestrating aggregates but containing no business logic
+
+**Still Spring Boot** — DDD is an architectural pattern, not a technology. Spring Boot bootstraps everything. The framework doesn't care whether `Shipment` lives in `/entity/` or `/domain/model/`.
+
+**Is it worth it here?** Not for a thin slice with one bounded context. DDD pays off when domain complexity grows — multiple aggregates, complex invariants, team boundaries. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full DDD alternative architecture including the aggregate model and component interaction diagram.

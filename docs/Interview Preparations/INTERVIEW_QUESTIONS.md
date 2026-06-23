@@ -27,6 +27,8 @@
 - [What AI got wrong — beyond the `receivedAt` bug](#what-ai-got-wrong--beyond-the-receivedat-bug)
 - [Could the thin slice have been leaner — just the engine, no endpoints or persistence?](#could-the-thin-slice-have-been-leaner--just-the-engine-no-endpoints-or-persistence)
 - [What other approaches exist for the core problem — and why they weren't done](#what-other-approaches-exist-for-the-core-problem--and-why-they-werent-done)
+- [How would you change the resolver logic for a new partner?](#how-would-you-change-the-resolver-logic-for-a-new-partner)
+- [If you had a DDD approach, would the architecture and source structure change?](#if-you-had-a-ddd-approach-would-the-architecture-and-source-structure-change)
 
 ---
 
@@ -131,6 +133,18 @@
 ---
 
 **Alternative approaches:** Event sourcing (O(n) queries, history is not primary read), CRDTs (solves concurrent writes not single-writer ordering), Saga (overkill for single-service problem), Batch ETL (introduces staleness), Blockchain (no multi-party consensus needed), MDM platforms (enterprise heavyweight for targeted domain problem).
+
+---
+
+**Resolver extensibility:** Small changes → edit `DefaultShipmentStateResolver` directly. Significant partner-specific changes → implement `ShipmentStateResolver` interface, mark `@Primary` or inject by name. `ShipmentEventService` holds the interface and doesn't know which implementation runs.
+
+---
+
+**DDD approach:** Architecture changes — Shipment becomes aggregate root owning its own state, repository interfaces in `/domain`, audit becomes domain events. Source structure changes — layered by domain concept (`/model`, `/services`, `/repositories`, `/application`, `/infrastructure`) not technical role. Still Spring Boot — DDD is a pattern, not a technology. Not worth it for a thin slice with one bounded context.
+
+---
+
+---
 
 ---
 
@@ -1261,3 +1275,131 @@ Centralise all master data including shipment state into an MDM tool (Informatic
 | Batch / ETL | Introduces staleness; real-time is required |
 | Blockchain / ledger | No multi-party consensus needed; single authority |
 | MDM platforms | Enterprise heavyweight for a targeted domain problem |
+
+---
+
+## How would you change the resolver logic for a new partner?
+
+**Small logic change** — edit `DefaultShipmentStateResolver` directly. It is a Spring `@Component`. The tests cover the transition rules. Update the class, update the tests, update the ADR if the decision changed.
+
+**Significant partner-specific logic** — implement `ShipmentStateResolver` as a new class:
+
+```java
+@Component
+public class PartnerBCustomResolver implements ShipmentStateResolver {
+    @Override
+    public ShipmentResolutionResult resolve(ShipmentEventEntity incoming,
+                                           ShipmentCurrentStateEntity current) {
+        // Partner B specific rules
+    }
+}
+```
+
+Register it as a bean. Make it the default with `@Primary`, or inject it by name where `ShipmentEventService` holds the interface.
+
+**How it works architecturally:** `ShipmentEventService` depends on `ShipmentStateResolver` — it holds the interface type, not a concrete class. At runtime Spring injects whichever implementation is marked `@Primary` (or the only one available). The service doesn't know or care which resolver is active.
+
+**When to add a new resolver:**
+- Partner B needs different transition rules than Partner A
+- A grace window needs different release logic per partner
+- A new correction workflow changes resolution for certain states
+
+**When to just edit the default:**
+- Minor tweaks to existing rules
+- Fixing a bug in the current logic
+- ADR updates that don't change the interface contract
+
+---
+
+## If you had a DDD approach, would the architecture and source structure change?
+
+**Yes, on both counts — but it would still be Spring Boot.**
+
+DDD is an architectural pattern, not a technology choice. Spring Boot is the runtime. The framework doesn't care whether your code is organised by technical layer or by domain concept.
+
+### What changes architecturally
+
+| Aspect | Current | DDD |
+|--------|---------|-----|
+| State ownership | `ShipmentEventService` + `ShipmentStateResolver` pass state in and mutate it | `Shipment` aggregate owns its state and enforces rules internally |
+| Business logic location | Spread across `ShipmentEventService` and `DefaultShipmentStateResolver` | Lives in the aggregate and domain services |
+| Repository interfaces | In `/repository` (technical layer) | In `/domain/repositories` — domain declares what it needs, infrastructure implements |
+| Audit trail | Service writes to `audit_log` table directly | Aggregate emits domain events: `ShipmentReceived`, `StatusChanged`, `EventRejected` |
+| Application service | `ShipmentEventService` — mixed orchestration + logic | `/application/commands` — orchestrates aggregates, handles transactions, contains no business logic |
+
+### Source structure
+
+Current (layered by technical concern):
+```
+/controller
+/service       — orchestration + business logic
+/domain        — ShipmentStatus enum only
+/entity        — JPA entities
+/dto           — API payloads
+/repository    — Spring Data JPA
+```
+
+DDD (layered by domain concept):
+```
+/presentation
+  /controllers  — HTTP endpoints
+  /dto         — API contracts only
+/application
+  /commands     — write use cases
+  /queries      — read use cases (CQRS)
+/domain
+  /model        — Aggregates, entities, value objects
+  /events       — Domain events
+  /services     — Domain services (e.g. ShipmentResolver)
+/infrastructure
+  /persistence  — Repository implementations
+  /messaging    — Domain event publishing
+```
+
+### The Shipment aggregate
+
+In DDD, `Shipment` is the aggregate root. It holds its own state and enforces its own invariants — no external service tells it what to do.
+
+```java
+public class Shipment {
+
+    private ShipmentId id;
+    private ShipmentStatus status;
+    private Instant lastReceivedAt;
+    private String location;
+
+    // Outside code calls this — aggregate enforces the rules
+    public void applyEvent(ShipmentEvent event) {
+        if (event.getReceivedAt().isBefore(this.lastReceivedAt)) {
+            throw new OutOfOrderEventException(event.getId());
+        }
+        if (!status.canTransitionTo(event.getStatus())) {
+            throw new InvalidTransitionException(status, event.getStatus());
+        }
+
+        this.status = event.getStatus();
+        this.lastReceivedAt = event.getReceivedAt();
+
+        // Emit domain event for audit trail
+        DomainEvents.publish(new StatusChangedEvent(...));
+    }
+}
+```
+
+State can only be changed through the aggregate. Outside code never directly sets `status = IN_TRANSIT` — it calls `shipment.applyEvent(event)` and the aggregate decides whether to accept it.
+
+### What stays the same
+
+- Spring Boot — HTTP, DI, transactions, scheduling all unchanged
+- Database schema — same tables, same JPA backing classes
+- The `ShipmentStateResolver` interface — still pluggable, still the extension point
+- HTTP endpoints — controllers remain, they just delegate to application services
+
+### Is it worth it for this project?
+
+No — not for a thin slice with a single bounded context and one courier partner. DDD pays off when:
+- Domain complexity is high — multiple aggregates, complex invariants
+- Multiple teams work on the same codebase
+- The domain logic grows enough that spread-out service classes become hard to reason about
+
+This project doesn't have that complexity yet. The current layered architecture is appropriate for the current scope. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full DDD alternative with component interaction diagrams.

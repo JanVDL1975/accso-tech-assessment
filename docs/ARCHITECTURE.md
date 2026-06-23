@@ -142,3 +142,121 @@ flowchart TD
 - [TECHNICAL_STRATEGY_MEMO.md](TECHNICAL_STRATEGY_MEMO.md) - Strategy, data integrity approach, and operational concerns
 - [DELIVERY_PLAN.md](DELIVERY_PLAN.md) - Phased delivery plan
 - [RISK_REGISTER.md](RISK_REGISTER.md) - Risks and mitigations
+
+---
+
+## DDD Alternative Structure
+
+The current codebase organises code by technical layer. Domain-Driven Design organises code by domain concept. Both use Spring Boot — DDD is an architectural pattern, not a technology choice.
+
+### Current vs DDD package structure
+
+```
+Current (layered by technical concern):
+
+/controller    ─ HTTP endpoints
+/service       ─ orchestration + business logic
+/domain        ─ ShipmentStatus enum only
+/entity        ─ JPA entities (DB tables)
+/dto           ─ API payloads
+/repository    ─ Spring Data JPA interfaces
+
+---
+
+DDD (layered by domain concept):
+
+/presentation
+  /controllers  ─ HTTP endpoints
+  /dto         ─ API contracts only
+
+/application
+  /commands     ─ write use cases
+  /queries      ─ read use cases (CQRS)
+
+/domain
+  /model        ─ Aggregates, entities, value objects
+  /events       ─ Domain events
+  /services     ─ Domain services (e.g. ShipmentResolver)
+  /repositories ─ Repository interfaces (contracts, not implementations)
+
+/infrastructure
+  /persistence  ─ Repository implementations
+  /messaging    ─ Domain event publishing
+```
+
+### DDD component interaction
+
+```mermaid
+graph TD
+    Courier["Courier Partner"] --> |POST /api/v1/shipments/events| Controller["Controller\n/presentation/controllers"]
+    Controller --> |receiveEvent(cmd)| AppService["Application Service\n/application/commands"]
+    AppService --> |load + apply| Aggregate["Shipment AGGREGATE ROOT\n/domain/model"]
+    Aggregate --> |emits| DomainEvent["Domain Event\n/domain/events"]
+    DomainEvent --> |publish| EventBus["Event Bus\n/infrastructure/messaging"]
+    EventBus --> |notify| AuditLogger["Audit Logger\n/listens to domain events"]
+    AppService --> |save| RepoImpl["JpaShipmentRepository\n/infrastructure/persistence"]
+    RepoImpl --> |implements| RepoIf["ShipmentRepository interface\n/domain/repositories"]
+    Aggregate --> |validate| Resolver["ShipmentResolver\n/domain/services"]
+```
+
+### The Shipment aggregate
+
+In DDD, the `Shipment` aggregate is the core domain object. It owns its state and enforces its own rules — no external service tells it what to do.
+
+```java
+// /domain/model/Shipment.java
+
+public class Shipment {
+
+    private ShipmentId id;
+    private ShipmentStatus status;
+    private Instant lastReceivedAt;
+    private Instant lastOccurredAt;
+    private String location;
+
+    // Outside code calls this — the aggregate enforces the rules
+    public void applyEvent(ShipmentEvent event) {
+        if (event.getReceivedAt().isBefore(this.lastReceivedAt)) {
+            throw new OutOfOrderEventException(event.getId());
+        }
+        if (!status.canTransitionTo(event.getStatus())) {
+            throw new InvalidTransitionException(status, event.getStatus());
+        }
+
+        this.status = event.getStatus();
+        this.lastReceivedAt = event.getReceivedAt();
+        this.lastOccurredAt = event.getOccurredAt();
+        this.location = event.getLocation();
+
+        // Emit domain event for audit trail
+        DomainEvents.publish(new StatusChangedEvent(...));
+    }
+}
+```
+
+Key: state can only be changed through the aggregate. Outside code never directly sets `status = IN_TRANSIT` — it calls `shipment.applyEvent(event)` and the aggregate decides whether to accept it.
+
+### What stays the same
+
+- Spring Boot — the runtime container, HTTP, DI, transactions, scheduling are all unchanged
+- Database schema — same tables, same JPA backing classes
+- HTTP endpoints — controllers remain, they just delegate to application services
+- The `ShipmentStateResolver` interface — still pluggable, still the extension point
+
+### What changes
+
+| Aspect | Current | DDD |
+|--------|---------|-----|
+| State ownership | `ShipmentEventService` + `ShipmentStateResolver` | `Shipment` aggregate owns its state |
+| Business logic location | Spread across service and resolver classes | Lives in the aggregate and domain services |
+| Repository interfaces | In `/repository` (technical layer) | In `/domain/repositories` — domain declares what it needs |
+| Audit trail | Writes to `audit_log` table | Domain events published: `ShipmentReceived`, `StatusChanged`, `EventRejected` |
+| Application service | `ShipmentEventService` (mixed orchestration + logic) | `/application` layer — orchestrates aggregates, handles transactions |
+
+### Is it worth it for this project?
+
+For a thin slice with a single bounded context and one courier partner — no. The current structure is appropriate. DDD's strength is managing complexity in large domains with multiple aggregates, complex invariants, and team boundaries.
+
+It becomes worth it if: Partner B onboarding adds significant domain complexity, multiple teams work on the same codebase, or the domain logic grows enough that spread-out service classes become harder to reason about.
+
+See also: [CODE_LAYERS.md](CODE_LAYERS.md) — current code layer reference
