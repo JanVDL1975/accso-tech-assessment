@@ -281,6 +281,9 @@ graph TD
     QA["Query APIs<br/>(status, history, audit)"]
     CL["Retention Cleanup<br/>(scheduled job)"]
     DISP["Dispute Endpoint<br/>(legal hold)"]
+    ADMIN["Admin<br/>(authorised operators)"]
+    CORR["Correction Endpoint<br/>(POST /admin/corrections)"]
+    AUTH["Authorization<br/>(bearer token)"]
 
     P --> IE
     IE --> DD
@@ -297,10 +300,17 @@ graph TD
     CL -->|skips held shipments| RAW
     CL -->|skips held shipments| DE
     CL -->|skips held shipments| AT
+    ADMIN --> AUTH
+    AUTH --> CORR
+    CORR -->|direct write| CS
+    CORR -->|eventType=CORRECTION| AT
     RAW --> QA
     DE --> QA
     CS --> QA
     AT --> QA
+
+    style CORR fill:#e7f3ff,stroke:#007bff,color:#0056b3
+    style AUTH fill:#fff3cd,stroke:#856404,color:#856404
 ```
 
 ### Three-Store Model
@@ -329,6 +339,61 @@ graph TD
 The cleanup job runs on a schedule and deletes records past their retention window. Before deleting, it checks the `dispute_hold` flag on `shipment_current_state` — held shipments are skipped.
 
 The **dispute endpoint** (`POST /api/v1/shipments/{shipmentId}/disputes`) sets `dispute_hold = true`, exempting that shipment's records from cleanup. The hold is cleared when the dispute is resolved.
+
+---
+
+## Correction Implementation
+
+Corrections address a different problem from disputes: where disputes preserve evidence, corrections change the authoritative state. A correction is needed when a terminal state is wrong — the shipment was delivered to the wrong address, or returned when it wasn't.
+
+Corrections are a separate path from normal event processing. They bypass the Resolution Engine entirely.
+
+### How corrections work
+
+```
+Admin → POST /api/v1/admin/shipments/{shipmentId}/corrections
+         Authorization: Bearer <operator-token>
+
+         {
+           "correctedStatus": "IN_TRANSIT",
+           "reason": "wrong_address",
+           "note": "Customer called to report incorrect delivery address"
+         }
+```
+
+The correction endpoint is separate from the normal webhook. It requires bearer token authentication. The operator's permissions are checked against a permissions matrix — an operator might be allowed to correct `DELIVERED → IN_TRANSIT` but not `DELIVERED → RETURNED`.
+
+### What corrections write
+
+| Store | Written? | Why |
+|-------|----------|-----|
+| `raw_events` | No | Corrections are not courier events — they are administrative overrides |
+| `derived_events` | No | Corrections are not canonical business events |
+| `shipment_current_state` | Yes — direct write | The correction changes the authoritative state |
+| `audit_log` | Yes — enriched | Records `eventType=CORRECTION`, `authorisedBy`, `correctionReason` |
+
+### Corrections vs the state machine
+
+The state machine is not consulted. A correction says "set the state to X regardless of what the state machine says." This is deliberate — a correction is not a courier event, it is an administrative override. The state machine governs how shipments move based on courier events; corrections govern how humans correct errors.
+
+Once corrections exist, no state is truly terminal. `DELIVERED` means "the normal delivery process completed, unless someone corrects it." The correction path can restart the journey.
+
+### What changes to the state machine
+
+`DELIVERED` and `RETURNED` remain valid terminal states for the normal event path. In the correction path, they are non-terminal — corrections can exit them.
+
+The resolver branches on `eventType`:
+- `NORMAL` → existing transition logic
+- `CORRECTION` → bypasses state machine, direct state override
+
+### Summary of stores and paths
+
+| Path | raw_events | derived_events | current_state | audit_log |
+|------|-----------|---------------|---------------|-----------|
+| Normal event | Written | Written | Written/updated | Written |
+| Dispute raised | Exempt from cleanup | Exempt | `dispute_hold = true` | Written |
+| Correction | Not written | Not written | Direct write | Written (enriched) |
+| Dispute resolved | Cleanup resumes | Cleanup resumes | `dispute_hold = false` | — |
 
 ---
 

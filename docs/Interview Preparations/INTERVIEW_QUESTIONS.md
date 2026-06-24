@@ -10,6 +10,7 @@
 - [Terminal states — what happens when a correction is needed?](#terminal-states--what-happens-when-a-correction-is-needed)
 - [How would the architecture change if a correction event type was implemented?](#how-would-the-architecture-change-if-a-correction-event-type-was-implemented)
 - [How would a separate correction ingestion point with authorization work?](#how-would-a-separate-correction-ingestion-point-with-authorization-work)
+- [How would corrections fit into the architecture diagram?](#how-would-corrections-fit-into-the-architecture-diagram)
 - [Grace window for Partner B — implemented or not?](#grace-window-for-partner-b--implemented-or-not)
 - [SQLite vs PostgreSQL — when to migrate and how?](#sqlite-vs-postgresql--when-to-migrate-and-how)
 - [Would the repository layer change if PostgreSQL was introduced?](#would-the-repository-layer-change-if-postgresql-was-introduced)
@@ -525,6 +526,79 @@ Corrections write only to `current_state` (to apply the new state) and `audit_lo
 | Audit functionality | Same audit log table, same retention policy, same query API — enriched with `eventType`, `authorisedBy`, `correctionReason` |
 | Raw events | Not written — corrections are not courier events |
 | Derived events | Not written — corrections do not appear in event history |
+
+---
+
+## How would corrections fit into the architecture diagram?
+
+The current post-change request diagram shows normal event flow through the Resolution Engine. Corrections don't appear yet — they are a separate path that bypasses the engine entirely.
+
+**The gap:** The diagram shows three event stores and the Resolution Engine writing to all of them. Corrections need a path that writes only to `current_state` and `audit_log`, bypassing `raw_events`, `derived_events`, and the Resolution Engine.
+
+**What corrections don't do:**
+- They don't go through the Resolution Engine — no transition validation
+- They don't write to `raw_events` — corrections are not courier events
+- They don't write to `derived_events` — corrections are not canonical business events
+- They don't use the webhook — the webhook is open to anyone; corrections require authentication
+
+**What corrections do:**
+- Write directly to `current_state` — the authoritative state changes
+- Write to `audit_log` with `eventType=CORRECTION`, `authorisedBy`, `correctionReason`
+- Require a separate admin endpoint with bearer token authentication
+
+**The corrected diagram:**
+
+```mermaid
+graph TD
+    P["Courier Partner"]
+    IE["Event Ingestion<br/>(webhook endpoint)"]
+    DD["Deduplication<br/>(eventId + partner)"]
+    N["Normaliser"]
+    RE["Resolution Engine<br/>(rules-based state derivation)"]
+    RAW["raw_events<br/>(append-only, 30-day)"]
+    CS["shipment_current_state<br/>(derived, queryable)"]
+    DE["derived_events<br/>(append-only, indefinite)"]
+    AT["audit_log<br/>(append-only, 1-year)"]
+    QA["Query APIs<br/>(status, history, audit)"]
+    CL["Retention Cleanup<br/>(scheduled job)"]
+    DISP["Dispute Endpoint<br/>(legal hold)"]
+    ADMIN["Admin<br/>(authorised operators)"]
+    CORR["Correction Endpoint<br/>(POST /admin/corrections)"]
+    AUTH["Authorization<br/>(bearer token)"]
+
+    P --> IE
+    IE --> DD
+    DD --> N
+    N --> RE
+    RE --> RAW
+    RE --> DE
+    RE --> CS
+    RE --> AT
+    RAW --> CL
+    DE --> CL
+    AT --> CL
+    DISP -->|sets dispute_hold| CS
+    CL -->|skips held shipments| RAW
+    CL -->|skips held shipments| DE
+    CL -->|skips held shipments| AT
+    ADMIN --> AUTH
+    AUTH --> CORR
+    CORR -->|direct write| CS
+    CORR -->|eventType=CORRECTION| AT
+    RAW --> QA
+    DE --> QA
+    CS --> QA
+    AT --> QA
+
+    style CORR fill:#e7f3ff,stroke:#007bff,color:#0056b3
+    style AUTH fill:#fff3cd,stroke:#856404,color:#856404
+```
+
+**The four key additions:**
+1. `Correction Endpoint` — separate from the normal webhook, requires authentication
+2. `Authorization` — bearer token validation, permissions matrix per-state
+3. Arrow from `Correction Endpoint` directly to `current_state` — bypassing the Resolution Engine
+4. Arrow from `Correction Endpoint` to `audit_log` — enriched with correction fields
 
 ---
 

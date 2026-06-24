@@ -76,6 +76,8 @@ stateDiagram-v2
 
 ## 4. What the Service Does (3 minutes)
 
+### Pre-change request (Phase 1 original)
+
 ```mermaid
 flowchart TD
     E["Event Arrives"] --> D{"Is it a duplicate?\n(eventId + partner)"}
@@ -89,11 +91,66 @@ flowchart TD
 
 > Every event is recorded. Every decision is logged. State only moves forward through valid transitions. Nothing is deleted or overwritten.
 
-Key points to emphasise:
+One append-only event store. Simple and correct for the original scope.
+
+Key points:
 - **Older event arrives?** → recorded but doesn't change anything. We keep the newer truth.
 - **Duplicate?** → recorded but ignored. Same decision every time.
 - **Invalid transition?** → recorded and rejected. State stays where it is.
 - **Terminal state (DELIVERED, RETURNED)?** → final. Nothing changes it.
+
+---
+
+### Post-change request
+
+The change request introduced legal retention requirements and Partner B preparation. Two things changed: the event store split into three stores, and two administrative paths were added.
+
+#### Normal event processing (updated)
+
+```mermaid
+flowchart TD
+    E["Event Arrives"] --> D{"Is it a duplicate?\n(eventId + partner)"}
+    D -->|Yes| S1["Log: DUPLICATE\nNo state change"]
+    D -->|No| R["Write to raw_events\n(after dedup check)"]
+    R --> O{"Is receivedAt older\nthan current state?"}
+    O -->|Yes| S2["Log: OUT_OF_ORDER\nNo state change"]
+    O -->|No| T{"Is transition\nallowed?"}
+    T -->|No| S3["Log: INVALID_TRANSITION\nState unchanged"]
+    T -->|Yes| U["Write derived_event\nUpdate current_state\nLog decision"]
+```
+
+Key changes from pre-change request:
+- Raw events written to `raw_events` immediately after dedup (not shown as one store)
+- `receivedAt` is the authoritative timestamp — changed from `occurredAt`
+- Three stores: `raw_events`, `derived_events`, `audit_log`
+
+#### Dispute endpoint — preserving evidence
+
+If evidence about a shipment needs to be preserved beyond normal retention:
+
+```
+POST /shipments/{id}/disputes
+→ Sets legal hold on the shipment
+→ Raw events for this shipment are exempt from cleanup
+→ Dispute resolved → hold cleared → normal retention resumes
+```
+
+A dispute does not change state. It exempts evidence from deletion.
+
+#### Correction endpoint — correcting wrong state
+
+If a terminal state is wrong — the package was delivered to the wrong address:
+
+```
+POST /admin/corrections (authorised operator only)
+→ Writes directly to current_state (bypasses state machine)
+→ Logs to audit trail with authorisedBy and reason
+→ Not a courier event — administrative override
+```
+
+A correction does not go through the normal event path. It is a direct administrative action that overrides the state.
+
+**Corrections and disputes are independent.** A dispute preserves evidence. A correction changes the authoritative state. A shipment can have both — a dispute raised while evidence is investigated, and a correction applied once the correct state is confirmed.
 
 ---
 

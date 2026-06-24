@@ -471,3 +471,81 @@ The following assumptions are load-bearing. If they prove wrong, parts of the de
 | Legal retention windows are defined and enforceable | 30-day raw / 1-year audit must be agreed with legal; legal hold must be triggered reliably |
 | Single-writer throughput is sufficient for Phase 1 | Write contention triggers PostgreSQL migration earlier than planned |
 | Partner B's out-of-order rate is manageable | High out-of-order rate makes grace window necessary; current design has no hold |
+
+---
+
+## 15. Corrections
+
+### The problem
+
+`DELIVERED` and `RETURNED` are terminal by design — no incoming courier event can change them. But terminal states can be wrong. The package was delivered to the wrong address. The return was initiated fraudulently. The system correctly processed the courier's event and correctly locked the state, but the underlying reality is different.
+
+Without a correction mechanism, the options are:
+1. **Manual database update** — an operator with direct DB access changes `current_state` directly. This bypasses the audit trail and creates a state change with no record of who did it or why.
+2. **No correction** — the wrong terminal state stands. Customer support sees `DELIVERED`. The system is wrong and there is no path to fix it.
+
+Neither is acceptable in production.
+
+### Why corrections bypass the state machine
+
+A correction is not a courier event. It is an administrative override. It says: "set the state to X regardless of what the courier said, and regardless of what the state machine allows."
+
+The state machine governs how shipments move based on courier events. Corrections govern how humans correct errors. These are different concerns — mixing them would require the state machine to know about administrative overrides, which couples administrative authority to event processing logic.
+
+The correction path is a direct write to `current_state`. The state machine is never consulted.
+
+### Why not a correction event type?
+
+A correction event type would flow through the normal event processing path — deduplication, resolution, state machine validation. This is wrong because:
+- Corrections need to exit terminal states — the state machine would reject them
+- Corrections need authorization — the webhook is open to anyone
+- Corrections need a different audit trail — they should record `authorisedBy`, not just `partner`
+
+A separate admin endpoint with bearer token authentication is the right separation.
+
+### What corrections write
+
+| Store | Written? | Why not? |
+|-------|----------|----------|
+| `raw_events` | No | Corrections are not courier events. Writing them to `raw_events` mixes admin overrides with partner events. |
+| `derived_events` | No | Corrections are not canonical business events. They don't represent what the courier reported. |
+| `current_state` | Yes — direct write | The authoritative state changes. This is the only write needed. |
+| `audit_log` | Yes — enriched | Records `eventType=CORRECTION`, `authorisedBy`, `correctionReason`. |
+
+### Authorization
+
+The correction endpoint requires a bearer token. The operator's permissions are checked against a permissions matrix:
+
+```
+Operator  |  DELIVERED→IN_TRANSIT  |  DELIVERED→RETURNED  |  RETURNED→IN_TRANSIT
+----------|------------------------|----------------------|------------------------
+agent-42  |  ✅ allowed            |  ❌ not allowed     |  ✅ allowed
+admin-1   |  ✅ allowed            |  ✅ allowed          |  ✅ allowed
+```
+
+Anonymous corrections are never allowed. The `authorisedBy` field is always populated.
+
+### Corrections vs disputes
+
+Disputes and corrections solve different problems:
+
+| | Dispute | Correction |
+|--|---------|-----------|
+| **Problem** | Evidence about to be deleted | Authoritative state is wrong |
+| **Action** | Activates legal hold | Overrides current state |
+| **Writes to** | `dispute_hold` flag on `current_state` | `current_state` directly |
+| **Who triggers** | Support agent | Authorised administrator |
+| **Target** | Active shipments | Terminal states |
+
+They are independent mechanisms. A dispute can be raised for a shipment that is later corrected. The dispute preserves evidence; the correction changes the state.
+
+### What changes when corrections are added
+
+| Concern | Current | With corrections |
+|---------|---------|-----------------|
+| Terminal states | Final — no outgoing transitions | Corrections can exit them |
+| Resolver logic | Single path | Branches on `eventType` |
+| Authorization | None (open webhook) | Admin endpoint with bearer token |
+| Audit trail | Standard event logging | Enriched with `authorisedBy`, `correctionReason` |
+| State machine | `DELIVERED` and `RETURNED` are sinks | Unchanged for normal path; correction path bypasses |
+| Dispute mechanism | Independent | Independent — no interaction |
