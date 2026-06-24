@@ -260,3 +260,85 @@ For a thin slice with a single bounded context and one courier partner — no. T
 It becomes worth it if: Partner B onboarding adds significant domain complexity, multiple teams work on the same codebase, or the domain logic grows enough that spread-out service classes become harder to reason about.
 
 See also: [CODE_LAYERS.md](CODE_LAYERS.md) — current code layer reference
+
+---
+
+## Post-Change Request Architecture
+
+The mandatory change request introduced three architectural changes: batch ingestion, legal retention, and Partner B preparation. The resulting architecture has three separate event stores, each with a distinct purpose and retention policy.
+
+```mermaid
+graph TD
+    P["Courier Partner"]
+    IE["Event Ingestion<br/>(webhook endpoint)"]
+    DD["Deduplication<br/>(eventId + partner)"]
+    N["Normaliser"]
+    RE["Resolution Engine<br/>(rules-based state derivation)"]
+    RAW["raw_events<br/>(append-only, 30-day retention)"]
+    CS["shipment_current_state<br/>(derived, queryable)"]
+    DE["derived_events<br/>(append-only, indefinite)"]
+    AT["audit_log<br/>(append-only, 1-year retention)"]
+    QA["Query APIs<br/>(status, history, audit)"]
+    CL["Retention Cleanup<br/>(scheduled job)"]
+    DISP["Dispute Endpoint<br/>(legal hold)"]
+
+    P --> IE
+    IE --> DD
+    DD --> N
+    N --> RE
+    RE --> RAW
+    RE --> DE
+    RE --> CS
+    RE --> AT
+    RAW --> CL
+    DE --> CL
+    AT --> CL
+    DISP -->|sets dispute_hold| CS
+    CL -->|skips held shipments| RAW
+    CL -->|skips held shipments| DE
+    CL -->|skips held shipments| AT
+    RAW --> QA
+    DE --> QA
+    CS --> QA
+    AT --> QA
+```
+
+### Three-Store Model
+
+| Store | Written by | Purpose | Retention |
+|-------|-----------|---------|-----------|
+| **raw_events** | Ingestion (after dedup) | Exact partner input — raw payloads for legal compliance and dispute evidence | 30 days |
+| **derived_events** | Resolution Engine | Canonical business transitions — deduplicated, ordered, validated events driving current state | Indefinite |
+| **audit_log** | Resolution Engine | Every resolution decision and its reasoning — for traceability and debugging | 1 year |
+| **shipment_current_state** | Resolution Engine | Derived current state per shipment — O(1) status lookups | Indefinite |
+
+### Data Flow
+
+1. Partner sends event(s) via webhook
+2. Deduplication check — `(eventId, partner)` uniqueness
+3. Events normalised to canonical model
+4. Resolution Engine evaluates each event:
+   - **raw_events** written immediately (after dedup)
+   - Resolution decision computed using `receivedAt` ordering
+   - If accepted: **derived_events** and **current_state** updated
+   - Every decision logged to **audit_log**
+5. Query APIs serve status, history, and audit from the appropriate store
+
+### Retention Cleanup
+
+The cleanup job runs on a schedule and deletes records past their retention window. Before deleting, it checks the `dispute_hold` flag on `shipment_current_state` — held shipments are skipped.
+
+The **dispute endpoint** (`POST /api/v1/shipments/{shipmentId}/disputes`) sets `dispute_hold = true`, exempting that shipment's records from cleanup. The hold is cleared when the dispute is resolved.
+
+---
+
+## Pre-Change Request Architecture (Original)
+
+The diagram above replaced the original single-event-store architecture. The original design had:
+
+- One append-only event store (now split into `raw_events` and `derived_events`)
+- No separate audit log (now a dedicated `audit_log` store)
+- `@EnableScheduling` removed (re-added to support cleanup jobs)
+- `occurredAt` used for ordering (updated to `receivedAt` per ADR-001, with the confirmed bug)
+
+This section is retained for historical reference.

@@ -4,6 +4,7 @@
 
 - [What was underspecified in brief?](#what-was-underspecified-in-brief)
 - [Why is event storage split into raw_events, derived_events, and audit_log?](#why-is-event-storage-split-into-raw_events-derived_events-and-audit_log)
+- [Why receivedAt over occurredAt?](#why-receivedat-over-occurredat)
 - [The `receivedAt` bug — how it slipped through and what it reveals](#the-receivedat-bug--how-it-slipped-through-and-what-it-reveals)
 - [Deduplication: code check vs database constraint](#deduplication-code-check-vs-database-constraint)
 - [Terminal states — what happens when a correction is needed?](#terminal-states--what-happens-when-a-correction-is-needed)
@@ -190,6 +191,23 @@ The separation means:
 - Debugging is possible even after raw events expire, because the audit log records the reasoning
 
 The alternative — one big event store with everything — would make retention policy harder to implement correctly and would mix the partner's raw payload format with the normalised canonical record longer than necessary.
+
+---
+
+## Why receivedAt over occurredAt?
+
+Three options were evaluated:
+
+**1. occurredAt — the event's actual timestamp as reported by the courier.**
+Rejected because some partners — particularly Partner B — backfill events. When Partner B accumulates events over hours and sends them as a batch, `occurredAt` values can be hours earlier than when the batch was actually emitted. This makes `occurredAt` actively unreliable: a delayed event could appear older than a genuine newer event, causing state regressions.
+
+**2. Our own ingestion timestamp — wall-clock time when our system receives the event.**
+Rejected because it severs the link to the partner's own timeline. If Partner B sends batch 1 at 09:00 and batch 2 at 17:00, but batch 2 arrives before batch 1 due to network timing, our own clock would order them backwards — introducing our own artifacts into the partner's sequencing logic.
+
+**3. receivedAt — the partner's own ingestion timestamp — chosen.**
+`receivedAt` is when the partner's own system received the event. This preserves the partner's chronological sequence without our network artifacts. Not perfect — Partner B's clock can still drift — but far more stable than `occurredAt` for the backfill problem. ADR-001 explicitly documents this decision.
+
+**The ordering rule:** if `incoming.receivedAt < currentState.lastReceivedAt`, the event is older — it is stored and audited but does not update current state. No grace window, no waiting, no speculation. Older means an earlier timestamp — less recent.
 
 ---
 
